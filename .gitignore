@@ -1,0 +1,18 @@
+# Pliki kompilacji i środowiska PlatformIO
+.pio/
+.vscode/
+*.bin
+*.elf
+*.hex
+*.o
+*.d
+
+# Pliki tymczasowe systemów operacyjnych
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Kopia zapasowa edytorów
+*~
+*.bak
