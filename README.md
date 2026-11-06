@@ -1,61 +1,62 @@
 # 💊 Automatyczny Podajnik Leków (ESP32-S3)
 
-Inteligentny, automatyczny dyspenser leków sterowany mikrokontrolerem **ESP32-S3** z wbudowanym serwerem WebUI, zegarem czasu rzeczywistego RTC DS1302, detekcją kubeczka przez fotorezystor oraz 8-komorowym bębnem napędzanym silnikiem krokowym.
+Inteligentny, automatyczny dyspenser leków sterowany mikrokontrolerem **ESP32-S3** z wbudowanym panelem WebUI (SoftAP), zegarem czasu rzeczywistego RTC DS1302, detekcją kubeczka ultradźwiękowym czujnikiem **AJ-SR04M** oraz 8-komorowym bębnem napędzanym silnikiem krokowym **28BYJ-48 (ULN2003)**.
 
 ---
 
-## 📸 Funkcjonalności projektu
+## 📸 Główne Funkcjonalności
 
 1. **8-komorowy bęben rewolwerowy:**
    * Niezależna kalibracja kroków silnika krokowego (28BYJ-48 + ULN2003) dla każdego z 8 slotów.
    * Możliwość precyzyjnego ustawienia punktu zero (pozycja bazowa).
    * Ręczny obrót z poziomu panelu WebUI lub fizycznego przycisku (GPIO19).
-2. **Zaawansowana detekcja obecności kubeczka:**
-   * Fotorezystor KY-018 na wejściu analogowym GPIO4.
-   * Wygaszanie diod podczas pomiaru (eliminacja zakłóceń własnego światła).
-   * Filtr synchroniczny sieci 50 Hz eliminujący migotanie sztucznego oświetlenia.
-   * 24 niezależne progi czułości dla każdej godziny doby (automatyczne dopasowanie do oświetlenia dziennego i nocnego).
+2. **Ultradźwiękowa detekcja obecności kubeczka (AJ-SR04M):**
+   * Pomiar odległości w czasie rzeczywistym (TRIG: GPIO15, ECHO: GPIO16).
+   * Programowa filtracja zakłóceń i eliminacja fałszywych odczytów.
+   * Dowolnie konfigurowalny zakres odległości w WebUI (np. min. 3 cm, max. 15 cm – obsługa do 10000 cm).
    * Wizualna sygnalizacja stanu diodami LED:
-     * **Zielona LED (GPIO1):** Kubeczek jest na miejscu.
-     * **Czerwona LED (GPIO2):** Brak kubeczka.
-3. **Harmonogram i alarmy:**
-   * Codzienny, automatyczny obrót o ustalonej godzinie (zegar czasu rzeczywistego DS1302).
-   * Przypomnienie po 5 minutach: jeśli po wydaniu leku kubeczek nie zostanie odebrany, głośniczek (GPIO8) odtwarza w kółko głośną melodię, dopóki kubek nie zostanie zabrany.
-   * Opcja wyciszenia głośniczka jednym kliknięciem.
+     * **Zielona LED (GPIO1):** Kubeczek jest na miejscu (dozowanie odblokowane).
+     * **Czerwona LED (GPIO2):** Brak kubeczka / stan czuwania (blokada wysypania leków).
+3. **Harmonogram i Bezpieczeństwo:**
+   * Dozowanie leków wg precyzyjnego zegara czasu rzeczywistego RTC DS1302 z bateryjnym podtrzymaniem.
+   * Auto-synchronizacja godziny z przeglądarką telefonu/komputera przy wejściu do panelu.
+   * **Alarm przypominający:** jeśli po podaniu leku kubek nie zostanie odebrany w ciągu 5 minut, głośniczek (GPIO8) emituje powtarzający się sygnał alarmowy.
+   * Opcja wyciszenia głośniczka jednym kliknięciem (MUTE) w WebUI.
 4. **Wbudowany Panel WebUI (Dark Mode):**
-   * Płytka rozgłasza własną sieć Wi-Fi: **`Podajnik Leków`** (hasło: `leki1234`).
+   * Własny punkt dostępowy Wi-Fi: **`Podajnik Leków`** (hasło: `leki1234`).
    * Panel dostępny w przeglądarce pod adresem: **`http://192.168.4.1`**.
-   * Podgląd stanu czujnika na żywo, synchronizacja czasu z telefonem, kalibracja slotów i progów.
-   * Wszystkie ustawienia zapisywane są trwale w pamięci Flash (EEPROM).
+   * Podgląd odległości na żywo, konfiguracja harmonogramu, kalibracja slotów i prędkości silnika.
+   * Wszystkie parametry zapisywane są trwale w pamięci EEPROM / Flash.
 
 ---
 
-## 🔌 Schemat podłączenia (Pinout)
+## 🔌 Schemat Podłączenia (Pinout Matrix)
 
-| Komponent | Pin modułu | Pin ESP32-S3 | Opis |
-|---|---|---|---|
-| **Zielona LED** | Anoda (+) | **GPIO1** | Sygnalizacja obecności kubeczka |
-| **Czerwona LED** | Anoda (+) | **GPIO2** | Sygnalizacja braku kubeczka |
-| **Fotorezystor KY-018** | Sygnał (S) | **GPIO4** | Odczyt natężenia światła (ADC) |
-| **DS1302 RTC** | CLK (SCLK) | **GPIO5** | Zegar magistrali RTC |
-| **DS1302 RTC** | DAT (I/O) | **GPIO6** | Linia danych RTC |
-| **DS1302 RTC** | RST (CE) | **GPIO7** | Reset / Chip Enable RTC |
-| **Głośnik / Buzzer** | Sygnał (+) | **GPIO8** | Sygnalizacja dźwiękowa i melodie |
-| **ULN2003 Driver** | IN1 | **GPIO10** | Silnik krokowy faza A |
-| **ULN2003 Driver** | IN2 | **GPIO11** | Silnik krokowy faza B |
-| **ULN2003 Driver** | IN3 | **GPIO12** | Silnik krokowy faza C |
-| **ULN2003 Driver** | IN4 | **GPIO13** | Silnik krokowy faza D |
-| **Przycisk fizyczny** | Styk | **GPIO19** | Ręczne wymuszenie obrotu (do GND) |
-| **Zasilanie modułów** | VCC | **3V3 / 5V** | Zasilanie logiki i silnika |
-| **Masa** | GND | **GND** | Wspólna masa układu |
+| Komponent | Pin Modułu | Pin ESP32-S3 | Typ Pinu | Opis i Funkcja |
+| :--- | :--- | :--- | :--- | :--- |
+| **LED Zielona** | Anoda (+) | **GPIO 1** | Digital Output | Sygnalizacja obecności kubka |
+| **LED Czerwona** | Anoda (+) | **GPIO 2** | Digital Output | Sygnalizacja braku kubka / czuwanie |
+| **DS1302 RTC** | SCLK / CLK | **GPIO 5** | Digital Output | Zegar magistrali RTC |
+| **DS1302 RTC** | IO / DAT | **GPIO 6** | Bi-directional | Linia danych RTC |
+| **DS1302 RTC** | CE / RST | **GPIO 7** | Digital Output | Chip Enable / Reset magistrali |
+| **Buzzer** | Sygnał (+) | **GPIO 8** | Digital Output | Sygnalizacja dźwiękowa i alarmy |
+| **ULN2003** | IN1 | **GPIO 10** | Digital Output | Silnik krokowy faza A |
+| **ULN2003** | IN2 | **GPIO 11** | Digital Output | Silnik krokowy faza B |
+| **ULN2003** | IN3 | **GPIO 12** | Digital Output | Silnik krokowy faza C |
+| **ULN2003** | IN4 | **GPIO 13** | Digital Output | Silnik krokowy faza D |
+| **AJ-SR04M** | TRIG | **GPIO 15** | Digital Output | Impuls wyzwalający pomiar (P15) |
+| **AJ-SR04M** | ECHO | **GPIO 16** | Digital Input | Odpowiedź ultradźwiękowa (P16) |
+| **Przycisk** | Styk | **GPIO 19** | Digital Input | Ręczny obrót bębna (do GND, INPUT_PULLUP) |
+| **Zasilanie** | VCC / VIN | **5V / 3.3V** | Power | Silnik 5V; logika 3.3V/5V |
+| **Masa** | GND | **GND** | Ground | Wspólna masa układu |
 
 ---
 
-## 📂 Struktura repozytorium
+## 📂 Struktura Repozytorium
 
 ```text
 PROJECT ESP/
-├── .gitignore               # Pliki ignorowane przez Git (np. .pio)
+├── .gitignore               # Pliki ignorowane przez Git
 ├── README.md                # Dokumentacja projektu
 ├── program/                 # Kod źródłowy mikrokontrolera
 │   ├── program.ino          # Główny kod programu (Arduino / C++)
@@ -71,15 +72,23 @@ PROJECT ESP/
 
 ---
 
-## 🚀 Jak wgrać program na ESP32
+## 🚀 Jak wgrać program na ESP32-S3
 
-### Opcja 1: Przez PlatformIO (Python)
+### Wymagania:
+Zainstalowany Python oraz PlatformIO:
+```bash
+pip install platformio
+```
+
+### Kompilacja i wgranie:
 W katalogu `program/`:
 ```bash
 python -m platformio run --target upload
 ```
 
-### Opcja 2: Przez Arduino IDE
-1. Zainstaluj w menedżerze bibliotek: **`Rtc by Makuna`**.
-2. Wybierz płytkę: **`ESP32-S3 Dev Module`** oraz właściwy port szeregowy COM.
-3. Kliknij **Wgraj** (`Ctrl + U`).
+### Tryb programowania (Bootloader):
+Jeśli port COM nie odpowiada podczas wgrywania:
+1. Przytrzymaj przycisk **BOOT** na płytce ESP32-S3.
+2. Wciśnij krótko przycisk **RESET (RST)**.
+3. Puść przycisk **BOOT**.
+4. Ponów polecenie `python -m platformio run --target upload`.

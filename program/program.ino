@@ -10,16 +10,17 @@
    ========================================================================= */
 #define PIN_LED_GREEN    1   // Zielona dioda (obecność kubeczka)
 #define PIN_LED_RED      2   // Czerwona dioda (brak kubeczka / błąd / stan czuwania)
-#define PIN_KY018_ADC    4   // Fotorezystor (KY-018 pin Sygnał S)
 #define PIN_RTC_CLK      5   // DS1302 SCLK / CLK
 #define PIN_RTC_DAT      6   // DS1302 IO / DAT
 #define PIN_RTC_RST      7   // DS1302 CE / RST
+#define PIN_BUZZER       8   // Głośniczek / buzzer (GPIO8 / P8)
 #define PIN_STEP_IN1     10  // ULN2003 Driver IN1
 #define PIN_STEP_IN2     11  // ULN2003 Driver IN2
 #define PIN_STEP_IN3     12  // ULN2003 Driver IN3
 #define PIN_STEP_IN4     13  // ULN2003 Driver IN4
+#define PIN_US_TRIG      15  // AJ-SR04M TRIG (P15)
+#define PIN_US_ECHO      16  // AJ-SR04M ECHO (P16)
 #define PIN_BUTTON       19  // Przycisk ręcznego dozowania (do GND z PULLUP)
-#define PIN_BUZZER       8   // Głośniczek / buzzer (zgodnie z podłączeniem: GPIO8 / P8)
 
 /* =========================================================================
    DANE PUNKTU DOSTĘPOWEGO (AP) I SERWERA WWW
@@ -30,23 +31,22 @@ const char* AP_PASS = "leki1234";
 WebServer server(80);
 
 /* =========================================================================
-   STRUKTURA USTAWIEŃ W PAMIĘCI EEPROM
+   STRUKTURA USTAWIEŃ W PAMIĘCI EEPROM (CZUJNIK AJ-SR04M)
    ========================================================================= */
-#define EEPROM_MAGIC 0x4D454435 // Wersja 5 konfiguracji (progi 24h)
+#define EEPROM_MAGIC 0x4D454437 // Wersja 7 konfiguracji (AJ-SR04M)
 
 struct Config {
   uint32_t magic;
-  int ldrThresholdPct;    // Domyślny próg ogólny
-  int hourlyThresholds[24]; // Niezależne progi fotorezystora dla każdej z 24 godzin (0..23)
-  bool ldrInvert;         // Logika kubka: true = odczyt < próg oznacza kubek
-  int slotSteps[8];       // Ilość kroków silnika dla każdego z 8 slotów / przedziałek
-  int currentSlot;        // Wybrany aktywny slot (0 - 7)
-  int stepDelayMicros;    // Prędkość silnika w us
-  bool buzzerMuted;       // Wyciszenie głośniczka
-  int scheduleHours[8];   // Harmonogram: godziny (0 - 23) lub -1
-  int scheduleMinutes[8]; // Harmonogram: minuty (0 - 59)
-  int scheduleSlot[8];    // Który slot (0 - 7) ma zostać podany o danej godzinie
-  int scheduleCount;      // Liczba wpisów w harmonogramie
+  int cupMinDistCm;        // Minimalna odległość kubeczka w cm (np. 3 cm)
+  int cupMaxDistCm;        // Maksymalna odległość kubeczka w cm (np. 15 cm)
+  int slotSteps[8];        // Ilość kroków silnika dla każdego z 8 slotów
+  int currentSlot;         // Wybrany aktywny slot (0 - 7)
+  int stepDelayMicros;     // Prędkość silnika w us
+  bool buzzerMuted;        // Wyciszenie głośniczka
+  int scheduleHours[8];    // Harmonogram: godziny (0 - 23) lub -1
+  int scheduleMinutes[8];  // Harmonogram: minuty (0 - 59)
+  int scheduleSlot[8];     // Który slot (0 - 7) ma zostać podany o danej godzinie
+  int scheduleCount;       // Liczba wpisów w harmonogramie
 };
 
 Config config;
@@ -69,17 +69,16 @@ const uint8_t stepSequence[8][4] = {
 
 int currentStepIndex = 0;
 int lastDispenseMinute = -1;
-int lastDispenseDay = -1; // Zapobiega powtórnemu wywołaniu w tej samej minucie danego dnia
 unsigned long lastSensorCheck = 0;
 bool lastCupPresent = false;
-int cachedLdrPct = 0; // Zapamiętany ostatni pomiar fotorezystora
+float cachedDistanceCm = 0.0;
 String lastStatusMessage = "Urządzenie gotowe do pracy.";
 
-// Zmienne do obsługi przypomnienia po 5 minutach (300 000 ms)
-bool waitingForCupPickup = false;          // Flaga oczekiwania na zabranie kubka po podaniu
-unsigned long dispenseTimestamp = 0;      // Czas podania leku
-unsigned long lastReminderAlarm = 0;       // Czas ostatniego odegrania przypomnienia
-const unsigned long CUP_TIMEOUT_MS = 300000; // 5 minut (5 * 60 * 1000 ms)
+// Zmienne przypomnienia po 5 minutach
+bool waitingForCupPickup = false;
+unsigned long dispenseTimestamp = 0;
+unsigned long lastReminderAlarm = 0;
+const unsigned long CUP_TIMEOUT_MS = 300000; // 5 minut
 
 /* =========================================================================
    FUNKCJE SILNIKA KROKOWEGO
@@ -113,18 +112,16 @@ void rotateMotor(int steps, int dir = 1) {
 }
 
 /* =========================================================================
-   FUNKCJE SYGNALIZACJI I SENSORA (0-100%)
+   FUNKCJE SYGNALIZACJI DŹWIĘKOWEJ
    ========================================================================= */
 void beep(int frequency = 2000, int durationMs = 100) {
   if (config.buzzerMuted) return;
   tone(PIN_BUZZER, frequency, durationMs);
 }
 
-// Melodyjka grana przy każdym obrocie bębna / podaniu leku
 void playDispenseMelody() {
   if (config.buzzerMuted) return;
-  // Wesoła melodyjka sukcesu
-  const int notes[] = { 1047, 1319, 1568, 2093 }; // C6, E6, G6, C7
+  const int notes[] = { 1047, 1319, 1568, 2093 };
   const int durations[] = { 100, 100, 100, 250 };
   for (int i = 0; i < 4; i++) {
     tone(PIN_BUZZER, notes[i], durations[i]);
@@ -132,62 +129,65 @@ void playDispenseMelody() {
   }
 }
 
-// Przeliczenie surowego odczytu ADC ESP32 (0 - 4095) na skalę 0 - 100 punktów
-// W momencie pomiaru wyłączamy obie diody LED i czekamy 120 ms,
-// po czym zbieramy 50 próbek pomiarowych w celu wygładzenia wszelkich tętnień świetlnych (np. migotanie żarówek 50Hz)
-int measureLdrPercentage() {
-  digitalWrite(PIN_LED_GREEN, LOW);
-  digitalWrite(PIN_LED_RED, LOW);
-  delay(120); // Dłuższy czas na pełną relaksację fotorezystora CdS po wygaszeniu diod
+/* =========================================================================
+   POMIAR ODLEGŁOŚCI - CZUJNIK ULTRADŹWIĘKOWY AJ-SR04M (OPTYMALIZACJA 3.3V)
+   ========================================================================= */
+float measureDistanceCm() {
+  // 1. Zapewnienie czystego stanu niskiego przed strzałem
+  digitalWrite(PIN_US_TRIG, LOW);
+  delayMicroseconds(10);
 
-  long sum = 0;
-  for (int i = 0; i < 50; i++) {
-    sum += analogRead(PIN_KY018_ADC);
-    delayMicroseconds(400); // 50 próbek x 400us = 20ms (dokładnie 1 pełny okres sieci 50Hz!)
+  // 2. Wysłanie dłuższego impulsu wyzwalającego (30 us) - kluczowe dla zasilania 3.3V!
+  digitalWrite(PIN_US_TRIG, HIGH);
+  delayMicroseconds(30);
+  digitalWrite(PIN_US_TRIG, LOW);
+
+  // 3. Oczekiwanie na odpowiedź ECHO (timeout 60 000 us = 60 ms)
+  unsigned long duration = pulseIn(PIN_US_ECHO, HIGH, 60000);
+  if (duration == 0) {
+    return -1.0; // Brak echa / brak odbicia
   }
-  int raw = sum / 50;
+
+  // 4. Przeliczenie na cm: dźwięk pokonuje drogę tam i z powrotem (343 m/s)
+  float dist = (float)duration * 0.01715f;
+  return dist;
+}
+
+// Uśrednianie kilku próbek z odrzuceniem błędów
+float getStableDistanceCm() {
+  float sum = 0;
+  int validCount = 0;
   
-  int pct = map(raw, 0, 4095, 0, 100);
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
-
-  cachedLdrPct = pct;
-  return pct;
-}
-
-// Wyznaczenie aktualnego progu fotorezystora dla bieżącej godziny
-int getCurrentThreshold() {
-  RtcDateTime now = Rtc.GetDateTime();
-  if (!now.IsValid()) return config.ldrThresholdPct;
-
-  int h = now.Hour();
-  if (h >= 0 && h < 24) {
-    return config.hourlyThresholds[h];
+  for (int i = 0; i < 4; i++) {
+    float d = measureDistanceCm();
+    if (d >= 1.0 && d <= 10000.0) {
+      sum += d;
+      validCount++;
+    }
+    delay(35); // Dłuższy odstęp między impulsami dla naładowania przetwornika przy 3.3V
   }
-  return config.ldrThresholdPct;
-}
 
-// Sprawdzenie stanu kubeczka
-bool evaluateCupState(int pct) {
-  int activeThreshold = getCurrentThreshold();
-  if (config.ldrInvert) {
-    return (pct < activeThreshold);
+  if (validCount > 0) {
+    cachedDistanceCm = sum / validCount;
   } else {
-    return (pct >= activeThreshold);
+    // Sprawdzenie pojedynczego odczytu
+    float single = measureDistanceCm();
+    cachedDistanceCm = (single >= 1.0 && single <= 10000.0) ? single : -1.0;
   }
+  return cachedDistanceCm;
 }
 
 bool checkCupPresent() {
-  return evaluateCupState(cachedLdrPct);
+  if (cachedDistanceCm <= 0) return false;
+  // Kubek znajduje się w zdefiniowanym przedziale odległości (np. 3 - 15 cm)
+  return (cachedDistanceCm >= config.cupMinDistCm && cachedDistanceCm <= config.cupMaxDistCm);
 }
 
-void performSensorMeasurementAndDisplay() {
-  int pct = measureLdrPercentage();
-  bool cup = evaluateCupState(pct);
+void updateSensorAndIndicators() {
+  getStableDistanceCm();
+  bool cup = checkCupPresent();
   lastCupPresent = cup;
-  int activeThresh = getCurrentThreshold();
 
-  // Natychmiastowe włączenie właściwej diody po pomiarze
   if (cup) {
     digitalWrite(PIN_LED_GREEN, HIGH);
     digitalWrite(PIN_LED_RED, LOW);
@@ -195,21 +195,21 @@ void performSensorMeasurementAndDisplay() {
     digitalWrite(PIN_LED_GREEN, LOW);
     digitalWrite(PIN_LED_RED, HIGH);
 
-    // KUBEK ZOSTAŁ ZABRANY! Resetujemy stan alarmu
     if (waitingForCupPickup) {
       waitingForCupPickup = false;
       noTone(PIN_BUZZER);
       lastStatusMessage = "Kubeczek z lekiem został odebrany. Alarm wyłączony.";
-      Serial.println("[ALARM] Kubek został odebrany! Zatrzymano powiadomienie.");
+      Serial.println("[ALARM] Kubek odebrany! Zatrzymano alarm.");
     }
   }
 
-  Serial.printf("[SENSOR co 5s] Odczyt: %d pkt, Aktywny prog: %d pkt, Inwersja: %d => Kubek: %s\n", 
-                pct, activeThresh, config.ldrInvert, cup ? "OBECNY (ZIELONY)" : "BRAK (CZERWONY)");
+  Serial.printf("[AJ-SR04M] Odleglosc: %.1f cm (Zakres: %d-%d cm) => Kubek: %s\n", 
+                cachedDistanceCm, config.cupMinDistCm, config.cupMaxDistCm, 
+                cup ? "OBECNY (ZIELONY)" : "BRAK (CZERWONY)");
 }
 
 /* =========================================================================
-   LOGIKA PODAWANIA LEKÓW ZE SLOTEM
+   LOGIKA PODAWANIA LEKÓW
    ========================================================================= */
 bool dispenseMedication(int slotIdx, const char* reason, bool force = false) {
   if (slotIdx < 0 || slotIdx >= 8) slotIdx = config.currentSlot;
@@ -231,20 +231,17 @@ bool dispenseMedication(int slotIdx, const char* reason, bool force = false) {
   }
 
   rotateMotor(stepsToRun, 1);
-
-  // Wesoła głośna melodyjka sukcesu po obrocie
   playDispenseMelody();
 
-  config.currentSlot = (slotIdx + 1) % 8; // Przejście do kolejnego slotu
+  config.currentSlot = (slotIdx + 1) % 8;
   EEPROM.put(0, config);
   EEPROM.commit();
 
-  // Uruchomienie licznika 5 minut na zabranie kubeczka
   waitingForCupPickup = true;
   dispenseTimestamp = millis();
 
   lastStatusMessage = String("Podano slot #") + (slotIdx + 1) + " (" + stepsToRun + " kroków). Oczekiwanie na zabranie kubeczka.";
-  Serial.printf("[DOZOWNIK] Podano pomyslnie. Oczekiwanie na odebranie leku (alarm za 5 min). Następny slot: #%d\n\n", config.currentSlot + 1);
+  Serial.printf("[DOZOWNIK] Podano pomyslnie. Oczekiwanie na odbiór (alarm za 5 min). Następny slot: #%d\n\n", config.currentSlot + 1);
   return true;
 }
 
@@ -255,19 +252,10 @@ void loadConfig() {
   EEPROM.begin(sizeof(Config));
   EEPROM.get(0, config);
   if (config.magic != EEPROM_MAGIC) {
-    Serial.println("[EEPROM] Inicjalizacja domyslnych wartosci v5 (24h)...");
+    Serial.println("[EEPROM] Inicjalizacja domyslnych wartosci v7 (AJ-SR04M)...");
     config.magic = EEPROM_MAGIC;
-    config.ldrThresholdPct = 40;
-    
-    // Domyślne wartości dla 24 godzin (nocą ciemniej ~30, za dnia jaśniej ~45-50)
-    for (int h = 0; h < 24; h++) {
-      if (h >= 6 && h < 12) config.hourlyThresholds[h] = 45;      // Rano
-      else if (h >= 12 && h < 18) config.hourlyThresholds[h] = 50; // Popołudnie
-      else if (h >= 18 && h < 22) config.hourlyThresholds[h] = 38; // Wieczór
-      else config.hourlyThresholds[h] = 30;                        // Noc
-    }
-
-    config.ldrInvert = true;
+    config.cupMinDistCm = 2;   // Minimalna odległość (np. 2 cm)
+    config.cupMaxDistCm = 15;  // Maksymalna odległość kubeczka (np. 15 cm)
     config.currentSlot = 0;
     config.stepDelayMicros = 1200;
     config.buzzerMuted = false;
@@ -304,7 +292,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DOSTAWCA LEKÓW - Dark Panel</title>
+  <title>Podajnik Leków - Panel</title>
   <style>
     :root {
       --bg: #121418;
@@ -397,7 +385,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       font-size: 14px;
     }
     label { font-weight: 500; color: var(--text-muted); }
-    input[type="number"], input[type="text"], input[type="time"], select {
+    input[type="number"], input[type="text"], input[type="time"] {
       background: #111827;
       border: 1px solid #374151;
       color: #f3f4f6;
@@ -407,64 +395,17 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       text-align: center;
       outline: none;
     }
-    input[type="number"]:focus, select:focus { border-color: var(--primary); }
-    
-    /* Pasek postępu fotorezystora 0-100 */
-    .bar-wrap {
-      width: 100%;
-      background: #111827;
-      height: 18px;
-      border-radius: 10px;
-      overflow: hidden;
-      margin: 10px 0 14px 0;
-      border: 1px solid #374151;
-      position: relative;
+    .dist-highlight {
+      font-size: 20px;
+      font-weight: bold;
+      color: #38bdf8;
     }
-    .bar-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #10b981, #f59e0b, #ef4444);
-      width: 0%;
-      transition: width 0.3s ease;
-    }
-    .bar-thresh-line {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      width: 2px;
-      background: #ffffff;
-      box-shadow: 0 0 6px #fff;
-    }
-
-    /* Siatka 8 slotów / przedziałek */
     .slots-grid {
       display: grid;
       grid-template-columns: repeat(2, 1fr);
       gap: 10px;
       margin-bottom: 14px;
     }
-    /* Siatka 24 godzin */
-    .hours-grid {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 8px;
-      margin-bottom: 14px;
-    }
-    .hour-item {
-      background: #111827;
-      border: 1px solid #374151;
-      padding: 6px 8px;
-      border-radius: 6px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 4px;
-    }
-    .hour-item.active-hour {
-      border-color: #60a5fa;
-      background: #1e3a8a;
-    }
-    .hour-label { font-size: 11px; font-weight: 600; color: #93c5fd; }
-    .hour-input { width: 55px !important; padding: 4px !important; font-size: 13px !important; }
     .slot-card {
       background: var(--slot-bg);
       border: 1px solid #334155;
@@ -480,25 +421,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
     }
     .slot-label { font-size: 13px; font-weight: 600; color: #93c5fd; }
     .slot-steps-in { width: 85px !important; }
-
-    /* Harmonogram */
-    .sched-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-    .sched-item {
-      background: #1a202c;
-      border: 1px solid #2d3748;
-      padding: 8px;
-      border-radius: 8px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 6px;
-      font-size: 13px;
-    }
     .log-box {
       background: #111827;
       border: 1px solid #1f2937;
@@ -523,15 +445,14 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         <span id="cupBadge" class="status-badge badge-cup-no">Łączenie...</span>
       </div>
 
-      <div class="row" style="margin-bottom: 4px;">
-        <span>Fotorezystor KY-018:</span>
-        <strong id="valLdr">-- / 100 pkt</strong>
+      <div class="row" style="margin-bottom: 6px;">
+        <span>Odległość (AJ-SR04M):</span>
+        <span id="valDist" class="dist-highlight">-- cm</span>
       </div>
-      <div class="bar-wrap">
-        <div id="barFill" class="bar-fill"></div>
-        <div id="barThreshLine" class="bar-thresh-line" style="left: 40%;"></div>
+      <div class="row">
+        <span>Zdefiniowany zakres kubka:</span>
+        <strong id="valRange" style="color: #94a3b8;">-- cm</strong>
       </div>
-
       <div class="row">
         <span>Zegar DS1302:</span>
         <strong id="valTime" style="color: #60a5fa;">--:--:--</strong>
@@ -553,19 +474,20 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       <button class="btn btn-secondary" style="margin-top: 8px;" onclick="manualNextSlot()">OBRÓĆ DO NASTĘPNEGO SLOTU (BEZ SPRAWDZANIA KUBKA)</button>
     </div>
 
-    <!-- KARTA 2: KALIBRACJA SENSORA (DLA KAŻDEJ GODZINY 0-23) -->
+    <!-- KARTA 2: KALIBRACJA CZUJNIKA AJ-SR04M -->
     <div class="card">
-      <h2>🎯 Kalibracja czujnika dla każdej godziny (00:00 - 23:00)</h2>
-      <p style="font-size: 13px; color: var(--text-muted); margin-top: 0;">Ustaw indywidualny próg czułości (0-100) dla każdej z 24 godzin doby. Aktualna godzina jest wyróżniona na niebiesko:</p>
+      <h2>📏 Kalibracja czujnika odległości (AJ-SR04M)</h2>
+      <p style="font-size: 13px; color: var(--text-muted); margin-top: 0;">Określ przedział odległości, w którym sensor widzi obecność kubka:</p>
       <form action="/save_sensor" method="POST">
-        <div class="hours-grid" id="hoursContainer">
-          <!-- Wypełniane dynamicznie przez JS dla 24 godzin -->
+        <div class="row">
+          <label>Minimalna odległość (cm):</label>
+          <input type="number" name="min_dist" id="inMinDist" min="0" max="10000" required>
         </div>
-        <div class="row" style="margin-top: 10px;">
-          <label>Inwersja (Zaciemniony = Kubek):</label>
-          <input type="checkbox" name="invert" id="inInvert" style="transform: scale(1.3); accent-color: var(--primary);">
+        <div class="row">
+          <label>Maksymalna odległość (cm):</label>
+          <input type="number" name="max_dist" id="inMaxDist" min="1" max="10000" required>
         </div>
-        <button type="submit" class="btn btn-secondary" style="margin-top: 10px;">Zapisz progi 24h</button>
+        <button type="submit" class="btn btn-secondary" style="margin-top: 8px;">Zapisz zakres odległości</button>
       </form>
     </div>
 
@@ -598,7 +520,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         <button type="button" class="btn btn-secondary" style="font-size: 13px;" onclick="testRotate(-256)">-256</button>
       </div>
 
-      <!-- USTAWIANIE PUNKTU ZERO -->
       <div style="margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--card-border);">
         <label style="color: #93c5fd; font-weight: 600;">📍 Punkt zerowy podajnika:</label>
         <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 10px 0;">Użyj przycisków powyżej aby ustawić komorę na pozycji wyjściowej, a następnie zapisz to jako Punkt Zero (Slot #1):</p>
@@ -631,21 +552,6 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
   <script>
     let firstLoad = true;
 
-    // Generowanie pól dla 24 godzin
-    function initHourGrid() {
-      let cont = document.getElementById('hoursContainer');
-      cont.innerHTML = '';
-      for (let h = 0; h < 24; h++) {
-        let hStr = (h < 10 ? '0' : '') + h + ':00';
-        let div = document.createElement('div');
-        div.className = 'hour-item';
-        div.id = 'hCard' + h;
-        div.innerHTML = '<span class="hour-label">' + hStr + '</span>' +
-                        '<input type="number" name="h' + h + '" id="inH' + h + '" class="hour-input" min="0" max="100" required>';
-        cont.appendChild(div);
-      }
-    }
-
     function refreshData() {
       fetch('/api/data')
         .then(r => r.json())
@@ -653,23 +559,15 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           document.getElementById('cupBadge').className = 'status-badge ' + (d.cup ? 'badge-cup-yes' : 'badge-cup-no');
           document.getElementById('cupBadge').innerText = d.cup ? 'KUBEK NA MIEJSCU' : 'BRAK KUBECZKA';
           
-          document.getElementById('valLdr').innerText = d.ldr + ' / 100 pkt';
-          document.getElementById('barFill').style.width = d.ldr + '%';
-          document.getElementById('barThreshLine').style.left = d.activeThresh + '%';
+          document.getElementById('valDist').innerText = (d.dist >= 0) ? d.dist + ' cm' : 'Brak echa / poza zakresem';
+          document.getElementById('valRange').innerText = d.minDist + ' - ' + d.maxDist + ' cm';
 
           document.getElementById('valTime').innerText = d.time;
           document.getElementById('valNextSlot').innerText = 'Slot #' + (d.curSlot + 1);
           document.getElementById('valStatus').innerText = d.statusMsg;
 
-          // Wyróżnienie aktualnej godziny w siatce 24h
-          let curH = parseInt(d.time.split(':')[0]);
-          for (let h = 0; h < 24; h++) {
-            let el = document.getElementById('hCard' + h);
-            if (el) {
-              if (h === curH) el.classList.add('active-hour');
-              else el.classList.remove('active-hour');
-            }
-          }
+          // Automatyczne dopasowanie czasu przy otwarciu strony
+          checkAutoSyncRtc(d.time);
 
           // Przycisk szybkiego wyciszenia
           let muteBtn = document.getElementById('btnMuteToggle');
@@ -691,13 +589,8 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
           }
 
           if (firstLoad) {
-            for (let h = 0; h < 24; h++) {
-              let inH = document.getElementById('inH' + h);
-              if (inH && d.hourlyThresh && d.hourlyThresh[h] !== undefined) {
-                inH.value = d.hourlyThresh[h];
-              }
-            }
-            document.getElementById('inInvert').checked = d.invert;
+            document.getElementById('inMinDist').value = d.minDist;
+            document.getElementById('inMaxDist').value = d.maxDist;
             document.getElementById('inMuted').checked = d.muted;
 
             for (let i = 0; i < 8; i++) {
@@ -760,11 +653,27 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
         });
     }
 
+    // Automatyczna synchronizacja czasu zegara RTC przy pierwszym otwarciu WebUI
+    let rtcAutoSynced = false;
+    function checkAutoSyncRtc(rtcTimeString) {
+      if (!rtcAutoSynced && rtcTimeString) {
+        rtcAutoSynced = true;
+        const now = new Date();
+        const parts = rtcTimeString.split(':');
+        if (parts.length === 3) {
+          const rtcH = parseInt(parts[0]);
+          const rtcM = parseInt(parts[1]);
+          // Jeśli czas różni się o więcej niż 2 minuty, synchronizuj automatycznie w tle
+          if (Math.abs(rtcH - now.getHours()) > 0 || Math.abs(rtcM - now.getMinutes()) > 2) {
+            console.log('Automatyczna synchronizacja zegara DS1302 z czasem telefonu...');
+            fetch('/api/set_time?h=' + now.getHours() + '&m=' + now.getMinutes() + '&s=' + now.getSeconds(), { method: 'POST' });
+          }
+        }
+      }
+    }
+
     setInterval(refreshData, 1500);
-    window.onload = function() {
-      initHourGrid();
-      refreshData();
-    };
+    window.onload = refreshData;
   </script>
 </body>
 </html>
@@ -789,21 +698,13 @@ void handleApiData() {
     snprintf(dailyBuf, sizeof(dailyBuf), "08:00");
   }
 
-  int pct = cachedLdrPct;
   bool cup = checkCupPresent();
-  int activeThresh = getCurrentThreshold();
 
   String json = "{";
   json += "\"cup\":" + String(cup ? "true" : "false") + ",";
-  json += "\"ldr\":" + String(pct) + ",";
-  json += "\"activeThresh\":" + String(activeThresh) + ",";
-  json += "\"hourlyThresh\":[";
-  for (int h = 0; h < 24; h++) {
-    json += String(config.hourlyThresholds[h]);
-    if (h < 23) json += ",";
-  }
-  json += "],";
-  json += "\"invert\":" + String(config.ldrInvert ? "true" : "false") + ",";
+  json += "\"dist\":" + String(cachedDistanceCm, 1) + ",";
+  json += "\"minDist\":" + String(config.cupMinDistCm) + ",";
+  json += "\"maxDist\":" + String(config.cupMaxDistCm) + ",";
   json += "\"curSlot\":" + String(config.currentSlot) + ",";
   json += "\"muted\":" + String(config.buzzerMuted ? "true" : "false") + ",";
   json += "\"time\":\"" + String(timeBuf) + "\",";
@@ -860,7 +761,7 @@ void handleApiRotate() {
 }
 
 void handleApiSetZero() {
-  config.currentSlot = 0; // Ustawienie Slot #1 jako punkt wyjściowy
+  config.currentSlot = 0;
   saveConfig();
   lastStatusMessage = "Zresetowano pozycję! Ustawiono Punkt Zero na Slot #1.";
   server.send(200, "text/plain; charset=utf-8", "Ustawiono aktualną pozycję jako Punkt Zero (Slot #1)!");
@@ -885,16 +786,13 @@ void handleApiSetTime() {
 }
 
 void handleSaveSensor() {
-  for (int h = 0; h < 24; h++) {
-    String argName = "h" + String(h);
-    if (server.hasArg(argName)) {
-      config.hourlyThresholds[h] = server.arg(argName).toInt();
-    }
+  if (server.hasArg("min_dist") && server.hasArg("max_dist")) {
+    config.cupMinDistCm = server.arg("min_dist").toInt();
+    config.cupMaxDistCm = server.arg("max_dist").toInt();
+    saveConfig();
+    updateSensorAndIndicators();
+    lastStatusMessage = "Zapisano zakres odległości: " + String(config.cupMinDistCm) + " - " + String(config.cupMaxDistCm) + " cm.";
   }
-  config.ldrInvert = server.hasArg("invert");
-  saveConfig();
-  performSensorMeasurementAndDisplay(); // Natychmiastowe przeliczenie i zaktualizowanie diod!
-  lastStatusMessage = "Zaktualizowano progi czujnika dla 24 godzin doby.";
   server.sendHeader("Location", "/");
   server.send(303);
 }
@@ -936,15 +834,12 @@ void checkSchedule() {
   RtcDateTime now = Rtc.GetDateTime();
   if (!now.IsValid()) return;
 
-  // Reset flagi minuty gdy zmieniła się minuta, aby harmonogram działał niezawodnie
   if (now.Minute() != lastDispenseMinute) {
     lastDispenseMinute = -1;
   }
 
-  // Jeśli w tej minucie już podano lek, czekamy na kolejną minutę
   if (lastDispenseMinute == now.Minute()) return;
 
-  // Sprawdzenie codziennej godziny
   if (config.scheduleHours[0] >= 0) {
     if (config.scheduleHours[0] == now.Hour() && config.scheduleMinutes[0] == now.Minute()) {
       lastDispenseMinute = now.Minute();
@@ -974,11 +869,32 @@ void handleButton() {
       buttonState = reading;
       if (buttonState == LOW) {
         Serial.println("[PRZYCISK] Wciśnięto przycisk fizyczny! Wymuszanie obrotu...");
-        dispenseMedication(config.currentSlot, "Przycisk fizyczny GPIO19", true); // force=true (obrót ZAWSZE)
+        dispenseMedication(config.currentSlot, "Przycisk fizyczny GPIO19", true);
       }
     }
   }
   lastButtonState = reading;
+}
+
+/* =========================================================================
+   ALARM PRZYPOMNIENIA PO 5 MINUTACH
+   ========================================================================= */
+void checkCupReminderAlarm() {
+  if (!waitingForCupPickup) return;
+
+  if (millis() - dispenseTimestamp >= CUP_TIMEOUT_MS) {
+    if (checkCupPresent()) {
+      if (millis() - lastReminderAlarm >= 2000) {
+        lastReminderAlarm = millis();
+        lastStatusMessage = "UWAGA: Lek czeka od ponad 5 minut! Odbierz kubeczek.";
+        Serial.println("[PRZYPOMNIENIE] Męczący alarm: minęło 5 minut, a kubek nadal stoi!");
+        playDispenseMelody();
+      }
+    } else {
+      waitingForCupPickup = false;
+      noTone(PIN_BUZZER);
+    }
+  }
 }
 
 /* =========================================================================
@@ -991,8 +907,12 @@ void setup() {
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
-  pinMode(PIN_KY018_ADC, INPUT);
   pinMode(PIN_BUZZER, OUTPUT);
+
+  // Konfiguracja pinów czujnika ultradźwiękowego AJ-SR04M
+  pinMode(PIN_US_TRIG, OUTPUT);
+  pinMode(PIN_US_ECHO, INPUT);
+  digitalWrite(PIN_US_TRIG, LOW);
 
   pinMode(PIN_STEP_IN1, OUTPUT);
   pinMode(PIN_STEP_IN2, OUTPUT);
@@ -1002,16 +922,25 @@ void setup() {
 
   loadConfig();
 
+  // Inicjalizacja zegara czasu rzeczywistego DS1302
   Rtc.Begin();
-  if (!Rtc.IsDateTimeValid()) {
-    RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
-    Rtc.SetDateTime(compiled);
-  }
   if (Rtc.GetIsWriteProtected()) {
+    Serial.println("[RTC] Wyłączanie ochrony zapisu DS1302...");
     Rtc.SetIsWriteProtected(false);
   }
   if (!Rtc.GetIsRunning()) {
+    Serial.println("[RTC] Uruchamianie oscylatora DS1302...");
     Rtc.SetIsRunning(true);
+  }
+
+  // Weryfikacja poprawności czasu z DS1302
+  RtcDateTime nowRtc = Rtc.GetDateTime();
+  if (!Rtc.IsDateTimeValid() || nowRtc.Year() < 2024 || nowRtc.Year() > 2099) {
+    Serial.println("[RTC] Wykryto niepoprawny czas w pamięci DS1302! Ustawianie czasu kompilacji programu...");
+    RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
+    Rtc.SetDateTime(compiled);
+  } else {
+    Serial.printf("[RTC] DS1302 czas prawidłowy: %02u:%02u:%02u\n", nowRtc.Hour(), nowRtc.Minute(), nowRtc.Second());
   }
 
   WiFi.mode(WIFI_AP);
@@ -1034,46 +963,19 @@ void setup() {
   server.on("/save_schedule", HTTP_POST, handleSaveSchedule);
   server.begin();
 
-  // Pierwszy pomiar z wygaszonymi diodami
-  performSensorMeasurementAndDisplay();
-}
-
-// Obsługa alarmu przypomnienia o nieodebranym kubku po 5 minutach
-void checkCupReminderAlarm() {
-  if (!waitingForCupPickup) return;
-
-  // Sprawdzamy czy minęło 5 minut od podania
-  if (millis() - dispenseTimestamp >= CUP_TIMEOUT_MS) {
-    // Sprawdzamy czy kubek nadal stoi
-    if (checkCupPresent()) {
-      // Co 2 sekundy gramy głośną melodyjkę przypominającą
-      if (millis() - lastReminderAlarm >= 2000) {
-        lastReminderAlarm = millis();
-        lastStatusMessage = "UWAGA: Lek czeka od ponad 5 minut! Odbierz kubeczek.";
-        Serial.println("[PRZYPOMNIENIE] Męczący alarm: minęło 5 minut, a kubek nadal stoi!");
-        playDispenseMelody();
-      }
-    } else {
-      // Kubek został zabrany
-      waitingForCupPickup = false;
-      noTone(PIN_BUZZER);
-    }
-  }
+  updateSensorAndIndicators();
 }
 
 void loop() {
   server.handleClient();
 
-  // Pomiar fotorezystora wykonywany dokładnie co 5 sekund (5000 ms)
-  // W momencie pomiaru obie diody gasną, po czym zapala się właściwa dioda
-  if (millis() - lastSensorCheck >= 5000) {
+  // Sprawdzanie odległości ultradźwiękowej co 1 sekundę
+  if (millis() - lastSensorCheck >= 1000) {
     lastSensorCheck = millis();
-    performSensorMeasurementAndDisplay();
+    updateSensorAndIndicators();
   }
 
-  // Sprawdzanie przypomnienia 5-minutowego
   checkCupReminderAlarm();
-
   handleButton();
   checkSchedule();
   yield();

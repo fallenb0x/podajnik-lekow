@@ -1,0 +1,145 @@
+================================================================================
+DOKUMENTACJA TECHNICZNA: AUTOMATYCZNY PODAJNIK LEKÓW (ESP32-S3)
+================================================================================
+
+Projekt: Inteligentny dyspenser leków sterowany mikrokontrolerem ESP32-S3
+Główne moduły: Czujnik AJ-SR04M, RTC DS1302, silnik 28BYJ-48 + ULN2003, WebUI
+
+
+--------------------------------------------------------------------------------
+1. WYKAZ I SPECYFIKACJA KOMPONENTÓW SPRZĘTOWYCH
+--------------------------------------------------------------------------------
+
+1. Mikrokontroler: ESP32-S3 DevKit
+   - Rdzeń: Dwurdzeniowy 32-bit Xtensa LX7 do 240 MHz
+   - Pamięć: 8MB SPI Flash, zintegrowane USB-CDC
+   - Łączność: Wi-Fi 802.11 b/g/n (SoftAP: "Podajnik Leków", IP: 192.168.4.1)
+   - Logika: 3.3V
+
+2. Czujnik odległości: AJ-SR04M (wodoodporny czujnik ultradźwiękowy)
+   - Zasada: Pomiar czasu powrotu fali ultradźwiękowej (pulseIn)
+   - Piny: TRIG -> GPIO 15, ECHO -> GPIO 16
+   - Zasilanie: 5V (zalecane) lub 3.3V
+   - Zastosowanie: Wykrywanie obecności kubeczka na podstawce
+
+3. Zegar czasu rzeczywistego: RTC DS1302
+   - Interfejs: Magistrala 3-przewodowa (ThreeWire)
+   - Piny: SCLK -> GPIO 5, DAT/IO -> GPIO 6, RST/CE -> GPIO 7
+   - Zasilanie: 3.3V + bateria podtrzymująca CR2032
+   - Funkcja: Odmierzanie dokładnego czasu dla harmonogramu dawek
+
+4. Silnik krokowy ze sterownikiem: 28BYJ-48 + ULN2003
+   - Zastosowanie: Napęd 8-komorowego bębna rewolwerowego
+   - Piny sterownika: IN1 -> GPIO 10, IN2 -> GPIO 11, IN3 -> GPIO 12, IN4 -> GPIO 13
+   - Tryb pracy: Half-step (sekwencja 8-fazowa)
+   - Zasilanie: 5V z linii zasilania
+
+5. Sygnalizator akustyczny: Buzzer pasywny / głośniczek
+   - Pin: GPIO 8 (do masy)
+   - Funkcja: Dźwięki potwierdzenia, melodie sukcesu, alarm przypomnienia
+
+6. Wskaźniki LED:
+   - Dioda Zielona: GPIO 1 (kubek obecny, dozowanie odblokowane)
+   - Dioda Czerwona: GPIO 2 (brak kubka / stan czuwania / blokada)
+
+7. Przycisk fizyczny (Ręczne dozowanie):
+   - Pin: GPIO 19 do masy (GND)
+   - Tryb: INPUT_PULLUP z programowym filtrem drgań (50 ms debouncing)
+
+
+--------------------------------------------------------------------------------
+2. TABELA POŁĄCZEŃ (PINOUT MATRIX)
+--------------------------------------------------------------------------------
+
+KOMPONENT           | PIN MODUŁU | PIN ESP32-S3 | TYP PINU       | FUNKCJA
+--------------------+------------+--------------+----------------+--------------------------
+Dioda Zielona       | Anoda (+)  | GPIO 1       | Digital Output | Kubek obecny
+Dioda Czerwona      | Anoda (+)  | GPIO 2       | Digital Output | Brak kubka / czuwanie
+DS1302 RTC          | SCLK / CLK | GPIO 5       | Digital Output | Zegar magistrali RTC
+DS1302 RTC          | DAT / IO   | GPIO 6       | Bi-directional | Linia danych RTC
+DS1302 RTC          | RST / CE   | GPIO 7       | Digital Output | Chip Enable / Reset RTC
+Buzzer / Głośnik    | Sygnał (+) | GPIO 8       | Digital Output | Sygnały dźwiękowe / PWM
+ULN2003 Sterownik   | IN1        | GPIO 10      | Digital Output | Silnik krokowy faza A
+ULN2003 Sterownik   | IN2        | GPIO 11      | Digital Output | Silnik krokowy faza B
+ULN2003 Sterownik   | IN3        | GPIO 12      | Digital Output | Silnik krokowy faza C
+ULN2003 Sterownik   | IN4        | GPIO 13      | Digital Output | Silnik krokowy faza D
+AJ-SR04M Czujnik    | TRIG       | GPIO 15      | Digital Output | Impuls wyzwalający (30 us)
+AJ-SR04M Czujnik    | ECHO       | GPIO 16      | Digital Input  | Sygnał powrotu fali
+Przycisk Manualny   | Styk       | GPIO 19      | Digital Input  | Obrót manualny (do GND)
+Zasilanie           | VCC / VIN  | 5V / 3.3V    | Power          | Zasilanie układu
+Masa                | GND        | GND          | Ground         | Wspólna masa układu
+
+
+--------------------------------------------------------------------------------
+3. ARCHITEKTURA I DZIAŁANIE OPROGRAMOWANIA (FIRMWARE)
+--------------------------------------------------------------------------------
+
+Kod źródłowy: program/program.ino
+Architektura oparta o nieblokującą pętlę loop() z wielozadaniowością czasową (millis()).
+
+1. Pomiar odległości kubeczka:
+   - Czujnik wyzwalany impulsem 30 us na pinie TRIG.
+   - Odczyt czasu echa za pomocą funkcji pulseIn() z limitem 60 ms.
+   - Wzór przeliczenia: Dystans (cm) = czas_us / 58.2
+   - Zastosowano filtrację medianową i uśrednianie próbek co 35 ms.
+   - Zakres wykrywania kubeczka: od cupMinDistCm do cupMaxDistCm (konfigurowalny w WebUI do 10000 cm).
+
+2. Sterowanie bębnem leków:
+   - Bęben posiada 8 niezależnych slotów (0 - 7).
+   - Obrót realizowany w trybie półkrokowym (Half-Step, 8 faz).
+   - Każdy slot posiada indywidualną liczbę kroków zapisaną w pamięci EEPROM, co umożliwia idealną kalibrację mechaniczną druku 3D.
+   - Po wykonaniu ruchu cewki silnika są natychmiast odłączane (LOW na GPIO 10..13), zapobiegając przegrzewaniu się silnika.
+
+3. Harmonogram i logika bezpieczeństwa:
+   - RTC DS1302 sprawdza nadejście zaprogramowanej godziny dawki.
+   - Przed obrotem sprawdzany jest stan kubka:
+     * Jeśli kubek stoi pod wylotem: bęben obraca się do zadanego slotu, wydaje lek i odgrywa melodię.
+     * Jeśli kubka brak: dozowanie zostaje wstrzymane, zapala się czerwona dioda, a podajnik czeka na podstawienie kubeczka (zapobiega rozsypaniu tabletek).
+   - Alarm 5-minutowy: Jeśli po wydaniu leku kubek nie zostanie odebrany w ciągu 5 minut, buzzer uruchamia cykliczny sygnał alarmowy przypominający o zażyciu leku.
+
+4. Pamięć trwała EEPROM:
+   Struktura Config przechowuje:
+   - Wartości minimalnego i maksymalnego dystansu dla kubeczka.
+   - Kalibrację liczby kroków dla każdego z 8 slotów.
+   - Ostatnio ustawioną pozycję bębna.
+   - Szybkość pracy silnika (stepDelayMicros).
+   - Flagę wyciszenia głośnika (buzzerMuted).
+   - Godziny, minuty i przypisane sloty dla 8 wpisów harmonogramu dobowego.
+
+
+--------------------------------------------------------------------------------
+4. INTERFEJS UŻYTKOWNIKA (WEBUI)
+--------------------------------------------------------------------------------
+
+Urządzenie uruchamia własny punkt dostępowy:
+- Sieć Wi-Fi (SSID): "Podajnik Leków"
+- Hasło Wi-Fi: "leki1234"
+- Adres w przeglądarce: http://192.168.4.1
+
+Możliwości panelu WebUI:
+- Podgląd na żywo odległości z czujnika i stanu obecności kubka.
+- Synchronizacja czasu RTC z czasem przeglądarki użytkownika.
+- Ustawianie godzin wydawania leków w harmonogramie.
+- Ręczne obracanie bębnem do wybranego slotu lub o 1 krok.
+- Zerowanie pozycji bębna (ustawienie punktu zero).
+- Konfiguracja progów odległości (min/max cm).
+- Wyciszenie dźwięków (przycisk MUTE).
+
+
+--------------------------------------------------------------------------------
+5. INSTRUKCJA WGRYWANIA OPROGRAMOWANIA (PLATFORMIO)
+--------------------------------------------------------------------------------
+
+Wymagania: Zainstalowany Python oraz PlatformIO CLI:
+pip install platformio
+
+Kroki wdrożenia:
+1. Podłącz ESP32-S3 kablem USB do komputera.
+2. Otwórz wiersz poleceń (terminal) w katalogu "program/".
+3. Uruchom polecenie:
+   python -m platformio run --target upload
+
+Rozwiązywanie problemów:
+- W przypadku problemu z portem COM, wprowadź płytkę w tryb Bootloadera:
+  Przytrzymaj przycisk BOOT -> wciśnij krótko RST -> puść BOOT -> ponów upload.
+================================================================================
