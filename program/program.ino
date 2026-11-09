@@ -211,24 +211,11 @@ void updateSensorAndIndicators() {
 /* =========================================================================
    LOGIKA PODAWANIA LEKÓW
    ========================================================================= */
-bool dispenseMedication(int slotIdx, const char* reason, bool force = false) {
+bool dispenseMedication(int slotIdx, const char* reason) {
   if (slotIdx < 0 || slotIdx >= 8) slotIdx = config.currentSlot;
   int stepsToRun = config.slotSteps[slotIdx];
 
-  Serial.printf("\n[DOZOWNIK] Podawanie slotu #%d (%d krokow). Powod: %s (force=%d)\n", slotIdx + 1, stepsToRun, reason, force);
-
-  if (!force && !checkCupPresent()) {
-    lastStatusMessage = "Brak kubeczka na miejscu! Wstrzymano podawanie.";
-    Serial.println("[BLAD] Brak kubeczka!");
-    for (int i = 0; i < 3; i++) {
-      beep(1000, 150);
-      digitalWrite(PIN_LED_RED, HIGH);
-      delay(200);
-      digitalWrite(PIN_LED_RED, LOW);
-      delay(100);
-    }
-    return false;
-  }
+  Serial.printf("\n[DOZOWNIK] Podawanie slotu #%d (%d krokow). Powod: %s\n", slotIdx + 1, stepsToRun, reason);
 
   rotateMotor(stepsToRun, 1);
   playDispenseMelody();
@@ -240,8 +227,8 @@ bool dispenseMedication(int slotIdx, const char* reason, bool force = false) {
   waitingForCupPickup = true;
   dispenseTimestamp = millis();
 
-  lastStatusMessage = String("Podano slot #") + (slotIdx + 1) + " (" + stepsToRun + " kroków). Oczekiwanie na zabranie kubeczka.";
-  Serial.printf("[DOZOWNIK] Podano pomyslnie. Oczekiwanie na odbiór (alarm za 5 min). Następny slot: #%d\n\n", config.currentSlot + 1);
+  lastStatusMessage = String("Podano slot #") + (slotIdx + 1) + " (" + stepsToRun + " kroków). Następny slot: #" + (config.currentSlot + 1);
+  Serial.printf("[DOZOWNIK] Podano pomyslnie. Następny slot: #%d\n\n", config.currentSlot + 1);
   return true;
 }
 
@@ -471,7 +458,7 @@ const char PAGE_MAIN[] PROGMEM = R"rawliteral(
       <div id="valStatus" class="log-box">Wczytywanie danych...</div>
 
       <button class="btn" style="margin-top: 14px;" onclick="dispenseCurrent()">PODAJ AKTUALNY SLOT</button>
-      <button class="btn btn-secondary" style="margin-top: 8px;" onclick="manualNextSlot()">OBRÓĆ DO NASTĘPNEGO SLOTU (BEZ SPRAWDZANIA KUBKA)</button>
+      <button class="btn btn-secondary" style="margin-top: 8px;" onclick="manualNextSlot()">OBRÓĆ DO NASTĘPNEGO SLOTU</button>
     </div>
 
     <!-- KARTA 2: KALIBRACJA CZUJNIKA AJ-SR04M -->
@@ -723,12 +710,8 @@ void handleApiData() {
 }
 
 void handleApiDispense() {
-  bool ok = dispenseMedication(config.currentSlot, "Żądanie z WebUI");
-  if (ok) {
-    server.send(200, "text/plain; charset=utf-8", "Lek został podany!");
-  } else {
-    server.send(400, "text/plain; charset=utf-8", "BŁĄD: Brak kubeczka na miejscu!");
-  }
+  dispenseMedication(config.currentSlot, "Żądanie z WebUI");
+  server.send(200, "text/plain; charset=utf-8", "Lek został podany!");
 }
 
 void handleApiForceAdvance() {
@@ -868,8 +851,8 @@ void handleButton() {
     if (reading != buttonState) {
       buttonState = reading;
       if (buttonState == LOW) {
-        Serial.println("[PRZYCISK] Wciśnięto przycisk fizyczny! Wymuszanie obrotu...");
-        dispenseMedication(config.currentSlot, "Przycisk fizyczny GPIO19", true);
+        Serial.println("[PRZYCISK] Wciśnięto przycisk fizyczny! Obrót bębna...");
+        dispenseMedication(config.currentSlot, "Przycisk fizyczny GPIO19");
       }
     }
   }

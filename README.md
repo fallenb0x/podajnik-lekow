@@ -15,10 +15,9 @@ Projekt zawiera kompletną bazę sprzętową: kod źródłowy, dokumentację tec
 2. **Ultradźwiękowa detekcja obecności kubeczka (AJ-SR04M):**
    * Pomiar odległości w czasie rzeczywistym z programowym filtrem eliminującym zakłócenia.
    * Dowolnie konfigurowalny przedział odległości kubka w WebUI (od 0 do 10000 cm).
-   * **Blokada bezpieczeństwa:** jeśli kubeczek nie zostanie podstawiony, podajnik nie obróci bębna (ochrona przed rozsypaniem tabletek).
    * Dedykowana sygnalizacja diodami LED:
-     * 🟢 **Dioda Zielona (GPIO1):** Kubeczek wykryty, podajnik gotowy.
-     * 🔴 **Dioda Czerwona (GPIO2):** Brak kubeczka / stan czuwania / blokada wydawania.
+     * 🟢 **Dioda Zielona (GPIO1):** Kubeczek wykryty.
+     * 🔴 **Dioda Czerwona (GPIO2):** Brak kubeczka / stan czuwania.
 3. **Harmonogram i Bezpieczeństwo Pacjenta:**
    * Do 8 zdefiniowanych dawek w ciągu doby wg zegara czasu rzeczywistego DS1302 z baterią podtrzymującą CR2032.
    * Automatyczna synchronizacja zegara z przeglądarką telefonu/komputera przy wejściu do panelu.

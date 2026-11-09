@@ -90,11 +90,9 @@ Architektura oparta o nieblokującą pętlę loop() z wielozadaniowością czaso
    - Każdy slot posiada indywidualną liczbę kroków zapisaną w pamięci EEPROM, co umożliwia idealną kalibrację mechaniczną druku 3D.
    - Po wykonaniu ruchu cewki silnika są natychmiast odłączane (LOW na GPIO 10..13), zapobiegając przegrzewaniu się silnika.
 
-3. Harmonogram i logika bezpieczeństwa:
+3. Harmonogram i wydawanie leków:
    - RTC DS1302 sprawdza nadejście zaprogramowanej godziny dawki.
-   - Przed obrotem sprawdzany jest stan kubka:
-     * Jeśli kubek stoi pod wylotem: bęben obraca się do zadanego slotu, wydaje lek i odgrywa melodię.
-     * Jeśli kubka brak: dozowanie zostaje wstrzymane, zapala się czerwona dioda, a podajnik czeka na podstawienie kubeczka (zapobiega rozsypaniu tabletek).
+   - Po nadejściu ustalonej godziny bęben natychmiast obraca się do zadanego slotu, wydaje lek i odgrywa melodię (niezależnie od tego, czy kubek stoi pod wylotem).
    - Alarm 5-minutowy: Jeśli po wydaniu leku kubek nie zostanie odebrany w ciągu 5 minut, buzzer uruchamia cykliczny sygnał alarmowy przypominający o zażyciu leku.
 
 4. Pamięć trwała EEPROM:
